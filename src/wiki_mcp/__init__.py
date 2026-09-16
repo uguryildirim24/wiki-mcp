@@ -1,6 +1,6 @@
 """wiki-mcp: Rolf's wiki for chat apps (ChatGPT, claude.ai, Cowork), as MCP tools over the `vault` command.
 
-wiki-mcp            serve on 127.0.0.1 and publish it with a Tailscale Funnel on :8443 (launchd runs this)
+wiki-mcp            serve on 127.0.0.1 and publish it at https://<host>/wiki via Tailscale Funnel (launchd runs this)
 wiki-mcp --local    serve on 127.0.0.1 only, for testing
 wiki-mcp url        print the connector URL to paste into ChatGPT or claude.ai
 wiki-mcp rotate     replace the secret in the URL (connected apps stop working until updated)
@@ -16,7 +16,6 @@ import json
 import os
 import secrets
 import shutil
-import signal
 import subprocess
 import sys
 import time
@@ -25,7 +24,8 @@ from pathlib import Path
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "wiki-mcp"
 TOKEN_FILE = CONFIG_DIR / "token"
 PORT = int(os.environ.get("WIKI_MCP_PORT", "8766"))
-FUNNEL_PORT = int(os.environ.get("WIKI_MCP_FUNNEL_PORT", "8443"))
+# claude.ai only reaches port 443. Funnel strips the /wiki prefix before proxying, so the server still sees /<token>/mcp.
+FUNNEL_PATH = "/wiki"
 
 client = contextvars.ContextVar("client", default="chat")
 
@@ -58,7 +58,7 @@ def mcp_path() -> str:
 
 
 def public_url() -> str:
-    return f"https://{tailnet_host()}:{FUNNEL_PORT}{mcp_path()}"
+    return f"https://{tailnet_host()}{FUNNEL_PATH}{mcp_path()}"
 
 
 def main() -> None:
@@ -122,7 +122,7 @@ def build_app(local_only: bool):
     hosts = [f"127.0.0.1:{PORT}", f"localhost:{PORT}"]
     if not local_only:
         host = tailnet_host()
-        hosts += [host, f"{host}:{FUNNEL_PORT}"]
+        hosts += [host, f"{host}:443"]
     app = mcp.streamable_http_app(
         streamable_http_path=mcp_path(),
         stateless_http=True,
@@ -138,24 +138,16 @@ def build_app(local_only: bool):
     return with_client_and_log(app, token())
 
 
-def start_funnel() -> subprocess.Popen:
-    # Foreground funnel inside a watchdog shell: it stops when this process exits, so the public URL only exists
-    # while wiki-mcp runs. Port 8443 keeps it clear of pro-mcp's funnel on 443.
-    watchdog = (
-        f'"{tailscale()}" funnel --https={FUNNEL_PORT} {PORT} >/dev/null 2>&1 & f=$!; '
-        'trap \'kill $f 2>/dev/null\' EXIT HUP INT TERM; '
-        f'while kill -0 {os.getpid()} 2>/dev/null && kill -0 $f 2>/dev/null; do sleep 1; done'
-    )
-    return subprocess.Popen(["/bin/sh", "-c", watchdog], start_new_session=True)
+def funnel_on(port: int) -> None:
+    # A background path on 443, not a foreground funnel: Tailscale lets several background paths share 443 (pro-mcp
+    # can hold "/"), but refuses a foreground funnel on a port that already has a listener.
+    subprocess.run([tailscale(), "funnel", "--bg", "--https=443", f"--set-path={FUNNEL_PATH}", str(port)],
+                   capture_output=True, text=True, check=False)
 
 
-def stop_funnel(funnel: subprocess.Popen | None) -> None:
-    if funnel and funnel.poll() is None:
-        os.killpg(funnel.pid, signal.SIGTERM)
-        try:
-            funnel.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            os.killpg(funnel.pid, signal.SIGKILL)
+def funnel_off() -> None:
+    subprocess.run([tailscale(), "funnel", "--https=443", f"--set-path={FUNNEL_PATH}", "off"],
+                   capture_output=True, text=True, check=False)
 
 
 def serve(local_only: bool) -> None:
@@ -163,10 +155,11 @@ def serve(local_only: bool) -> None:
 
     app = build_app(local_only)
     print(f"local:   http://127.0.0.1:{PORT}/<token>/mcp", file=sys.stderr, flush=True)
-    funnel = None if local_only else start_funnel()
-    if funnel:
-        print(f"public:  https://{tailnet_host()}:{FUNNEL_PORT}/<token>/mcp  (wiki-mcp url)", file=sys.stderr, flush=True)
+    if not local_only:
+        funnel_on(PORT)
+        print(f"public:  https://{tailnet_host()}{FUNNEL_PATH}/<token>/mcp  (wiki-mcp url)", file=sys.stderr, flush=True)
     try:
         uvicorn.run(app, host="127.0.0.1", port=PORT, log_level="warning")
     finally:
-        stop_funnel(funnel)
+        if not local_only:
+            funnel_off()
