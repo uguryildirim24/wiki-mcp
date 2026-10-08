@@ -1,2 +1,28 @@
+# Python environments, caches and builds
 .venv/
+venv/
 __pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.uv-cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime state and secrets
+.runtime/
+.env
+.env.*
+.envrc
+*.log
+token
+tokens/
+secrets/
+credentials*.json
+*.pem
+*.key
+
+# OS files
+.DS_Store

@@ -1,7 +1,9 @@
 [project]
 name = "wiki-mcp"
 version = "0.1.0"
-description = "Rolf's wiki for chat apps (ChatGPT, claude.ai, Cowork): an MCP bridge over the vault command"
+description = "MCP bridge for reading and staging edits to a wiki through the vault command"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.13"
 dependencies = [
     "mcp>=2.2.0",
